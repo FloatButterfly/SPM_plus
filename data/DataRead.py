@@ -2,7 +2,7 @@ import os
 
 from skimage.io import imread
 from torch.utils.data import Dataset
-
+import pandas as pd
 from .base_dataset import *
 
 
@@ -123,6 +123,100 @@ class TrainPairedData(Dataset):
 
     def __len__(self):
         return len(self.images)
+
+
+class TrainVidData(Dataset):
+    def __init__(self, img_csv_dir, lab_csv_dir, opt):
+        super().__init__()
+        self.opt = opt
+        # self.img_csv_dir = opt.img_csv_dir
+        # self.lab_csv_dir = opt.lab_csv_dir
+        
+        img_pair_dir = pd.read_csv(img_csv_dir)
+        lab_pair_dir = pd.read_csv(lab_csv_dir)
+        self.size = len(img_pair_dir)
+        print("length of dataset:%d"%self.size)
+        
+        self.images = list()
+        self.labels = list()
+
+        for i in range(self.size):
+            img_pair = [img_pair_dir.iloc[i]['from'],img_pair_dir.iloc[i]['to']]
+            lab_pair = [lab_pair_dir.iloc[i]['from'],lab_pair_dir.iloc[i]['to']]
+            if not self.check_consist(img_pair,lab_pair):
+                continue
+            else:
+                self.images.append(img_pair)
+                self.labels.append(lab_pair)
+
+        print(len(self.images),len(self.labels))
+
+    def check_consist(self, img_pair,lab_pair):
+        ifr,ito = img_pair
+        lfr,lto = lab_pair
+        if ifr.split('/')[-1] != lfr.split('/')[-1] or ifr.split('/')[-2] != lfr.split('/')[-2] or ifr.split('/')[-3] != lfr.split('/')[-3]:
+            return False
+        if ito.split('/')[-1] != lto.split('/')[-1] or ito.split('/')[-2] != lto.split('/')[-2] or ito.split('/')[-3] != lto.split('/')[-3]:
+            return False
+        return True
+
+    def postprocess(self, input_dict):
+        label = input_dict['key_label']
+        label = label - 1
+        label[label == -1] = self.opt.label_nc
+        
+        label = input_dict['P_label']
+        label = label - 1
+        label[label == -1] = self.opt.label_nc
+
+    def __getitem__(self, index):
+        key_img_path, P_img_path = self.images[index]
+        key_lab_path, P_lab_path = self.labels[index]
+        
+        assert self.check_consist(self.images[index],self.labels[index]), "The label_path %s and image_path %s don't match." % \
+                                                         (self.images[index], self.labels[index])
+
+        key_img = Image.open(key_img_path).convert('RGB')
+        P_img = Image.open(P_img_path).convert('RGB')
+        key_lab = Image.open(key_lab_path)
+        P_lab = Image.open(P_lab_path)
+
+        # import pdb
+        # pdb.set_trace()
+
+        params = get_params(self.opt, key_img.size)
+        transforms_image = get_transform(self.opt, params, method=Image.LANCZOS)
+        transforms_label = get_transform(self.opt, params, method=Image.NEAREST, normalize=False)
+
+        key_image_tensor = transforms_image(key_img)
+        key_label_tensor = transforms_label(key_lab)
+        key_label_tensor = key_label_tensor * 255
+        
+        P_image_tensor = transforms_image(P_img)
+        P_label_tensor = transforms_label(P_lab)
+        P_label_tensor = P_label_tensor * 255
+
+
+        # label_tensor[label_tensor == 255] = self.opt.label_nc
+
+        input_dict = {'key_image': key_image_tensor,
+                      'key_label': key_label_tensor,
+                      'key_image_path': key_img_path,
+                      'key_label_path': key_lab_path,
+                      'P_image': P_image_tensor,
+                      'P_label': P_label_tensor,
+                      'P_image_path': P_img_path,
+                      'P_label_path': P_lab_path,
+                      }
+
+        if self.opt.dataset_mode == "ade20k":
+            self.postprocess(input_dict)
+
+        return input_dict
+
+    def __len__(self):
+        return len(self.images)
+
 
 
 class TrainData(TrainDataBase):

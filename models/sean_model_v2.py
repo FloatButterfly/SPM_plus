@@ -6,15 +6,21 @@ Add training for residual layers
 """
 import os
 
+from torch import renorm
+
 import models.networks as networks
 from lpips_pytorch import lpips, LPIPS
 from util import util
 from .EntropyBottleneck import EntropyBottleneck, TextureEntropyBottleneck_v3, TextureEntropyBottleneck, TextureEntropyBottleneck_v2, TextureEntropyBottleneck_v4, TextureEntropyBottleneck_v1,TextureEntropyBottleneck_v0
 from .networks import *
 from perceptual_similarity import perceptual_loss as ps
+from pytorch_msssim import SSIM
 
 tensor_kwargs = {"dtype": torch.float32, "device": torch.device("cuda:0")}
 
+class SSIM_loss(SSIM):
+    def forward(self, img1, img2):
+        return 100 * (1 - super(SSIM_loss, self).forward(img1, img2))
 
 class CSEANModel_2(torch.nn.Module):
     @staticmethod
@@ -45,10 +51,12 @@ class CSEANModel_2(torch.nn.Module):
             #     opt.gan_mode, tensor=self.FloatTensor, opt=self.opt)
             # self.criterionL1 = torch.nn.L1Loss()
             self.loss_mse = torch.nn.MSELoss()
+            self.criterion_SSIM = SSIM_loss(size_average=True, data_range=1.0)
             # if self.opt.k_vgg:
             #     self.criterionVGG = networks.VGGLoss(self.opt.gpu_ids)
             init_loss = self.FloatTensor(1).fill_(0).cuda(self.opt.local_rank)
-            self.loss = {"mse": init_loss, "lpips": init_loss, "bpp":init_loss}
+            self.loss = {"mse": init_loss, "lpips": init_loss, "res_mse": init_loss, \
+                "bpp":init_loss, "ssim": init_loss, "mse1": init_loss}
 
     def recons_base(self, data):
         input_semantics = data['label'].cuda(self.opt.local_rank)
@@ -88,15 +96,85 @@ class CSEANModel_2(torch.nn.Module):
 
         return real_image,refine_img
 
+    
+    def module_test(self,data):
+        input_semantics = data['label'].cuda(self.opt.local_rank)
+        real_image = data['image'].cuda(self.opt.local_rank)
+        input_semantics_onehot = self.to_onehot(input_semantics)  # unpadding
+        style_matrix = self.netE(real_image, input_semantics).cuda(self.opt.local_rank)  # (bs,512,19,1)
 
+        if torch.isnan(style_matrix).any():
+            raise AssertionError("nan in style matrix")
+        q_style_matrix, style_z_hat, texture_length, latents_decor = self.texture_entropy(
+            style_matrix / (2 ** self.opt.qp_step))
+        q_style_matrix = q_style_matrix * (2 ** self.opt.qp_step)
+
+        decode_image = self.netG(input_semantics_onehot, q_style_matrix)
+        
+        latent_residual, att_encode = self.residual_encoder(real_image, decode_image, vis=True)
+        
+        # latent_residual_hat, z_hat, res_length = self.residual_entropy_model(latent_residual)
+        latent_residual_hat, _, res_length = self.residual_entropy_model(latent_residual/ (2**self.opt.res_qp))
+        latent_residual_hat = latent_residual_hat * (2**self.opt.res_qp)
+        
+        decode_residual, att_decode = self.residual_decoder(latent_residual_hat, decode_image,vis=True)
+        
+        # if self.opt.renorm_residue:
+        real_residue = real_image-decode_image
+        decode_residual, norm_residue = self.residual_renorm(real_residue,decode_residual)
+        # refine_img, feature_img, feature_residual = self.refine_model(decode_residual, decode_image, vis=True)
+        
+        return real_image, decode_image, att_encode, att_decode, latent_residual, latent_residual_hat, decode_residual, real_residue, norm_residue
+    # feature_img, feature_residual,refine_img,
+        
+    def residual_renorm(self,real_residue,decode_residue):
+        rmin = torch.min(real_residue).item()
+        rmax = torch.max(real_residue).item()
+        dmin = torch.min(decode_residue).item()
+        dmax = torch.max(decode_residue).item()
+        if dmax-dmin > 1e-3:
+            norm_residue = (decode_residue-dmin)/(dmax-dmin)
+            renorm_residue = norm_residue*(rmax-rmin)+rmin
+            return renorm_residue, norm_residue
+        else:
+            return decode_residue,decode_residue
+    
     def residual_enhance(self,real_image,decode_image):
         latent_residual = self.residual_encoder(real_image, decode_image)
-        latent_residual_hat, _, res_length = self.residual_entropy_model(latent_residual)
+        if self.opt.no_entropy:
+            latent_residual_hat = latent_residual
+            res_bpp = self.FloatTensor(1).fill_(0).cuda(self.opt.local_rank)
+        else:
+            latent_residual_hat, _, res_length = self.residual_entropy_model(latent_residual/ (2**self.opt.res_qp))
+            latent_residual_hat = latent_residual_hat * (2**self.opt.res_qp)
+            res_bpp = res_length / (real_image.numel() / real_image.size(1))
         decode_residual = self.residual_decoder(latent_residual_hat, decode_image)
-        refine_img = self.refine_model(decode_residual, decode_image)
-        res_bpp = res_length / (real_image.numel() / real_image.size(1))
+        if self.opt.renorm_residue:
+            real_residue = real_image-decode_image
+            decode_residual,_ = self.residual_renorm(real_residue,decode_residual)
+        # refine_img = self.refine_model(decode_residual, decode_image)
+        # if self.opt.residual_encoder_v2:
+        #     refine_img = decode_residual + decode_image
+        # else:
+        if self.opt.use_refine:
+            refine_img = self.refine_model(decode_residual,decode_image)
+        else:
+            refine_img = decode_residual + decode_image
+        return refine_img, res_bpp, decode_residual
 
-        return refine_img,res_bpp
+    def val_residue(self,data):
+        real_image, decode_image, tex_bpp = self.recons_base(data)
+        latent_residual = self.residual_encoder(real_image, decode_image)
+        latent_residual_hat, _, res_length = self.residual_entropy_model(latent_residual/ (2**self.opt.res_qp))
+        latent_residual_hat = latent_residual_hat * (2**self.opt.res_qp)
+        res_bpp = res_length / (real_image.numel() / real_image.size(1))
+        decode_residual = self.residual_decoder(latent_residual_hat, decode_image)
+        if self.opt.use_refine:
+            refine_img = self.refine_model(decode_residual,decode_image)
+        else:
+            refine_img = decode_residual + decode_image
+        return refine_img, res_bpp, decode_residual
+        
 
     def forward(self, data, mode='residual', regularize=False, style_code=None, lmbda=-1):
         loss = 0
@@ -117,13 +195,25 @@ class CSEANModel_2(torch.nn.Module):
             return real_img,refine_img
         elif mode == "residual":
             real_image, decode_image, tex_bpp = self.recons_base(data)
-            refine_img, res_bpp= self.residual_enhance(real_image,decode_image)
+            refine_img, res_bpp, decode_residual = self.residual_enhance(real_image,decode_image)
+            
             self.refine_img = refine_img
             self.loss['bpp'] = res_bpp
+            self.loss['ssim'] = self.criterion_SSIM(real_image,refine_img)
             self.loss['mse'] = self.loss_mse((real_image+1.0)/2.0*255.0,(refine_img+1.0)/2.0*255.0)
+            # self.loss['res_mse'] = self.loss_mse(((real_image-decode_image)+1.0)/2.0*255.0,(decode_residual+1.0)/2.0*255.0)
+            if self.opt.use_refine:
+                refine_img1 = decode_residual + decode_image
+                self.loss['mse1'] = self.loss_mse((real_image+1.0)/2.0*255.0,(refine_img1+1.0)/2.0*255.0)
             self.loss['lpips'] = torch.mean(self.loss_lpips.forward(real_image,refine_img))
-            total_loss = self.opt.lmbda * self.loss['bpp'] + self.opt.k_mse * self.loss['mse'] + self.opt.k_lpips * self.loss['lpips']
+            total_loss = self.opt.lmbda * self.loss['bpp'] + self.opt.k_mse * self.loss['mse'] + \
+                         self.opt.k_lpips * self.loss['lpips'] + self.opt.k_ssim * self.loss['ssim'] + \
+                         self.opt.k_mse1 * self.loss['mse1'] 
+                        #  + self.opt.k_res_mse * self.loss['res_mse']
             return total_loss, res_bpp, refine_img, self.loss
+        elif mode == "val_res":
+            refine_img, res_bpp, decode_residual = self.val_residue(data)
+            return refine_img, res_bpp, decode_residual
         else:
             return loss
 
@@ -185,10 +275,15 @@ class CSEANModel_2(torch.nn.Module):
         return net
 
     def initialize_enhance_networks(self, opt):
-        self.residual_encoder = self.create_network(Residual_Encoder(6, 96, 16),opt)
-        self.residual_decoder = self.create_network(Residual_Decoder(16, 96, 3),opt)
-        self.refine_model = self.create_network(Refinement(3, 48, 64, 3),opt)
-        self.residual_entropy_model = self.create_network(ResidualEntropyBottleneck(16, 96),opt)
+        if self.opt.residual_encoder_v2:
+            self.residual_encoder = self.create_network(Residual_Encoder_v2(3, 96, self.opt.res_noc),opt)
+            self.residual_decoder = self.create_network(Residual_Decoder_v2(self.opt.res_noc, 96, 3),opt)
+            self.refine_model = self.create_network(Refinement_v2(3, 64, 3),opt)
+        else:
+            self.residual_encoder = self.create_network(Residual_Encoder(6, 96, self.opt.res_noc),opt)
+            self.residual_decoder = self.create_network(Residual_Decoder(self.opt.res_noc, 96, 3),opt)
+            self.refine_model = self.create_network(Refinement(3, 48, 64, 3),opt)
+        self.residual_entropy_model = self.create_network(ResidualEntropyBottleneck(self.opt.res_noc, 96),opt)
 
         if not opt.isTrain or opt.continue_train:
             self.residual_entropy_model = util.load_network(self.residual_entropy_model, 'residual_entropy', opt.which_epoch, opt)
@@ -214,7 +309,7 @@ class CSEANModel_2(torch.nn.Module):
         G_params = list(self.residual_encoder.parameters())
         G_params += list(self.residual_decoder.parameters())
         G_params += list(self.residual_entropy_model.parameters())
-        G_params = list(self.refine_model.parameters())
+        G_params += list(self.refine_model.parameters())
 
         G_lr = opt.lr
         beta1, beta2 = opt.beta1, opt.beta2

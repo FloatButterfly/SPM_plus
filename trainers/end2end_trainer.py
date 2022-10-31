@@ -4,12 +4,13 @@ Copyright (C) 2019 NVIDIA Corporation.  All rights reserved.
 Licensed under the CC BY-NC-SA 4.0 license (https://creativecommons.org/licenses/by-nc-sa/4.0/legalcode).
 """
 import torch
-import torchprof
+# import torchprof
 from torch import nn
-from apex import amp
+# from apex import amp
 from models.networks.sync_batchnorm import DataParallelWithCallback
 from models.sean_compression_model import CSEANModel
-from models.sean_model_v1 import CSEANModel_1
+# from models.sean_model_v1 import CSEANModel_1
+from models.sean_vid_model import CSEANModel_2
 
 
 class End2EndTrainer:
@@ -23,7 +24,7 @@ class End2EndTrainer:
         self.opt = opt
         # if opt.ablation:
         #     self.model=ablation.CSEANModel(opt)
-        self.model = CSEANModel_1(opt).cuda(opt.local_rank)
+        self.model = CSEANModel_2(opt).cuda(opt.local_rank)
 #         print(self.model)
         self.loss_item = None
         if opt.isTrain:
@@ -67,11 +68,11 @@ class End2EndTrainer:
         else:
             self.loss, self.bpp, self.decode_image, self.loss_item = self.model_on_one_gpu(data, mode="generator",
                                                                                                lmbda=lmbda)
-        if self.opt.apex:
-            with amp.scale_loss(self.loss,self.optimizer_G):
-                    self.loss.backward()
-        else:
-            self.loss.backward()
+        # if self.opt.apex:
+        #     with amp.scale_loss(self.loss,self.optimizer_G):
+        #             self.loss.backward()
+        # else:
+        self.loss.backward()
 #         for name, parms in self.model_on_one_gpu.named_parameters():
 # #             if name.find('texture_entropy') != -1:
 # #                 print('-->name:', name, '-->grad_requirs:',parms.requires_grad, \
@@ -119,11 +120,11 @@ class End2EndTrainer:
                 self.optimizer_CD.step()
         else:
             self.d_losses, self.d_loss_item = self.model_on_one_gpu(data, mode='discriminator')
-            if self.opt.apex:
-                with amp.scale_loss(self.d_losses,self.optimizer_D):
-                    self.d_losses.backward()
-            else:
-                self.d_losses.backward()
+            # if self.opt.apex:
+            #     with amp.scale_loss(self.d_losses,self.optimizer_D):
+            #         self.d_losses.backward()
+            # else:
+            self.d_losses.backward()
 
         # nn.utils.clip_grad_norm_(self.model_on_one_gpu.parameters(), 10)
         self.optimizer_D.step()

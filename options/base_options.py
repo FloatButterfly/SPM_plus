@@ -35,7 +35,8 @@ class BaseOptions:
         parser.add_argument('--norm_E', type=str, default='spectralinstance',
                             help='instance normalization or batch normalization')
         parser.add_argument('--phase', type=str, default='train', help='train, val, test, etc')
-
+        parser.add_argument('--base_epoch', type=str, default='latest',
+                            help='which epoch to load for base networks? set to latest to use latest cached model')
         # input/output sizes
         parser.add_argument('--batchSize', type=int, default=1, help='input batch size')
         parser.add_argument('--preprocess_mode', type=str, default='scale_width_and_crop',
@@ -115,6 +116,8 @@ class BaseOptions:
         parser.add_argument('--load_codec', action='store_true', help='whether load the pretrained codec for semantic ')
         parser.add_argument('--k_lpips', type=float, default=0, help='weight of lpips distortion')
         parser.add_argument('--k_mse', type=float, default=0, help='weight of mse')
+        parser.add_argument('--k_mse1', type=float, default=0, help='weight of mse')
+        parser.add_argument('--k_ssim', type=float, default=0, help='weight of mse')
         parser.add_argument('--k_sem', type=float, default=0, help='weight of semantic mse')
         parser.add_argument('--k_feat', type=float, default=0.0, help='weight for feature matching loss')
         parser.add_argument('--k_vgg', type=float, default=0.0, help='weight for vgg loss')
@@ -133,6 +136,7 @@ class BaseOptions:
         parser.add_argument('--cont', type=float, default=1.0, help='consis_dominator')
         parser.add_argument('--qp_step', type=float, default=0.01,
                             help='quantization scale for style_matrix: 1e-2, 1e-3, 1e-4')
+        parser.add_argument('--res_qp', type=float, default=0, help='quantization scale for style_matrix: 1e-2, 1e-3, 1e-4')
 
         # if train with entropy optimization
         parser.add_argument('--with_entropy', action="store_true", help='if train the code with entropy estimation')
@@ -161,7 +165,14 @@ class BaseOptions:
                             help='whether to use texture entropy bottleneck v3.')
         parser.add_argument('--semantic_prior_v4', action='store_true',
                             help='whether to use texture entropy bottleneck v4.')
-
+        parser.add_argument('--residual_encoder_v2', action='store_true',
+                            help='whether to use texture entropy bottleneck v4.')
+        
+        parser.add_argument('--train_img_csv', type=str, default='./datasets/cityscapes/')
+        parser.add_argument('--train_lab_csv', type=str, default='./datasets/val')
+        parser.add_argument('--test_img_csv', type=str, default='./datasets/cityscapes/')
+        parser.add_argument('--test_lab_csv', type=str, default='./datasets/val')
+        parser.add_argument('--res_noc', type=int, default=16, help="residual latents channel number")
         parser.add_argument('--upper_bound', type=float, default=0.1, help="rate param")
         parser.add_argument('--lower_bound', type=float, default=0.01, help="rate param")
         parser.add_argument('--lmbda', type=float, default=10, help="rate param")
@@ -175,6 +186,10 @@ class BaseOptions:
         parser.add_argument('--binary_quant', action='store_true', help='binary quantization, qp 2,4,6,8,10')
         parser.add_argument('--GSM', action='store_true', help='use GSM entropy model')
         parser.add_argument('--no_hyper', action='store_true', help='use full factorized model')
+        parser.add_argument('--no_entropy', action='store_true', help='use full factorized model')
+        parser.add_argument('--use_refine', action='store_true', help='use full factorized model')
+        parser.add_argument('--renorm_residue', action='store_true', help='use full factorized model')
+        
         self.initialized = True
         self.isTrain = False
         return parser

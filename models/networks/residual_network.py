@@ -13,7 +13,39 @@ class NetModule(nn.Module):
         self._noc = int(out_channels)
 
 
-## GDN Network ##
+## GDN Network input residual, output residual##
+class Residual_Encoder_v2(BaseNetwork):
+    def __init__(self, in_channels, latent_channels, out_channels):  # 3,96,48
+        super(Residual_Encoder_v2, self).__init__()
+        print("use residual encoder v2")
+        self._nic = int(in_channels)
+        self._nlc = int(latent_channels)
+        self._noc = int(out_channels)
+        # self.sin_channel = int(in_channels // 2)
+        self.layer_seq1 = nn.Sequential(
+            SignConv2d(self._nic, self._nlc, 5, 2, upsample=False, use_bias=True),  # 1,128,5,2
+            GDN2d(self._nlc, inverse=False),
+            SignConv2d(self._nlc, self._nlc, 5, 2, upsample=False, use_bias=True),
+            GDN2d(self._nlc, inverse=False),
+        )
+
+        self.layer_seq2 = nn.Sequential(
+            SignConv2d(self._nlc, self._nlc, 5, 2, upsample=False, use_bias=True),
+            GDN2d(self._nlc, inverse=False),
+            SignConv2d(self._nlc, self._noc, 5, 2, upsample=False, use_bias=True)
+        )
+
+    def forward(self, x_real, x_compressed, vis=False):
+        # shape should be [B,3,h,w]
+        x = x_real-x_compressed
+        x1 = self.layer_seq1(x)
+        out = self.layer_seq2(x1)
+        # print(out.shape)
+        if vis:
+            return out,x1
+        return out
+
+
 class Residual_Encoder(BaseNetwork):
     def __init__(self, in_channels, latent_channels, out_channels):  # 6,96,16
         super(Residual_Encoder, self).__init__()
@@ -46,7 +78,7 @@ class Residual_Encoder(BaseNetwork):
             SignConv2d(self._nlc, self._noc, 5, 2, upsample=False, use_bias=True)
         )
 
-    def forward(self, x_real, x_compressed):
+    def forward(self, x_real, x_compressed, vis=False):
         # shape should be [B,3,h,w]
         x = torch.cat((x_real, x_compressed), dim=1)
         x1 = self.layer_seq1(x)
@@ -55,7 +87,10 @@ class Residual_Encoder(BaseNetwork):
         x1 = att * x1
         out = self.layer_seq2(x1)
         # print(out.shape)
+        if vis:
+            return out, att
         return out
+
 
 
 class Residual_Decoder(BaseNetwork):
@@ -91,15 +126,47 @@ class Residual_Decoder(BaseNetwork):
             SignConv2d(self._nlc, self._noc, 5, 2, upsample=True, use_bias=True)
         )
 
-    def forward(self, latent_residual, x_compressed):
+    def forward(self, latent_residual, x_compressed, vis=False):
         x1 = self.layer_seq1(latent_residual)
         att = self.attention_seq(x_compressed)
         # print(x1.shape, att.shape)
         x1 = att * x1
         out = self.layer_seq2(x1)
         # print(out.shape)
+        if vis:
+            return out, vis
         return out
 
+
+class Residual_Decoder_v2(BaseNetwork):
+    def __init__(self, in_channels, latent_channels, out_channels):
+        super(Residual_Decoder_v2, self).__init__()
+        # 16,96,3
+        print("use residual decoder v2")
+        self._nic = int(in_channels)
+        self._nlc = int(latent_channels)
+        self._noc = int(out_channels)
+      
+        self.layer_seq1 = nn.Sequential(
+            SignConv2d(self._nic, self._nlc, 5, 2, upsample=True, use_bias=True),  # 16,96,5,2
+            GDN2d(self._nlc, inverse=True),
+            SignConv2d(self._nlc, self._nlc, 5, 2, upsample=True, use_bias=True),
+            GDN2d(self._nlc, inverse=True),
+        )
+
+        self.layer_seq2 = nn.Sequential(
+            SignConv2d(self._nlc, self._nlc, 5, 2, upsample=True, use_bias=True),
+            GDN2d(self._nlc, inverse=True),
+            SignConv2d(self._nlc, self._noc, 5, 2, upsample=True, use_bias=True)
+        )
+
+    def forward(self, latent_residual, x_compressed, vis=False):
+        x1 = self.layer_seq1(latent_residual)
+        out = self.layer_seq2(x1)
+        # print(out.shape)
+        if vis:
+            return out, x1
+        return out
 
 ## GDN Network ##
 class Refinement(BaseNetwork):
@@ -133,12 +200,50 @@ class Refinement(BaseNetwork):
             SignConv2d(self._nlc, self._noc, 3, 1, upsample=False, use_bias=True),
         )
 
-    def forward(self, decode_residual, x_compressed):
+    def forward(self, decode_residual, x_compressed, vis=False):
         x1 = self.resblock_seq1(x_compressed)
         x2 = self.resblock_seq2(decode_residual)
         # print(x1.shape, x2.shape)
         x = torch.cat((x1, x2), dim=1)
         out = self.resblock_seq3(x)
+        if vis:
+            return out, x1, x2
+        return out
+
+
+class Refinement_v2(BaseNetwork):
+    def __init__(self, in_channels, latent_channels, out_channels):  # 3,64,3
+        super(Refinement_v2, self).__init__()
+        
+        self._nic = int(in_channels)
+        self._nlc = int(latent_channels)
+        self._noc = int(out_channels)
+
+        self.resblock_seq1 = nn.Sequential(
+            SignConv2d(self._nic, self._nlc, 3, 1, upsample=False, use_bias=True),
+            nn.LeakyReLU(0.2, inplace=True),
+            ResBlock(self._nlc, self._nlc, downsample=False),
+            ResBlock(self._nlc, self._nlc, downsample=False),
+        )
+
+        
+        self.resblock_seq2 = nn.Sequential(
+            ResBlock(self._nlc, self._nlc, downsample=False),
+            ResBlock(self._nlc, self._nlc, downsample=False),
+            ResBlock(self._nlc, self._nlc, downsample=False),
+            SignConv2d(self._nlc, self._noc, 3, 1, upsample=False, use_bias=True),
+        )
+
+    def forward(self, decode_residual, x_compressed, vis=False):
+        # x1 = self.resblock_seq1(x_compressed)
+        # x2 = self.resblock_seq2(decode_residual)
+        # # print(x1.shape, x2.shape)
+        # x = torch.cat((x1, x2), dim=1)
+        x1 = x_compressed + decode_residual
+        x = self.resblock_seq1(x1)
+        out = self.resblock_seq2(x)
+        if vis:
+            return out, x
         return out
 
 
